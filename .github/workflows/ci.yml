@@ -2,8 +2,11 @@ name: CI Build
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ 3.5.x, 'issue/3.5.x/**' ]
+    inputs:
+      test-filter:
+        description: 'Optional surefire -Dtest selector; empty runs the full suite'
+        required: false
+        default: ''
 
 permissions: read-all
 
@@ -14,6 +17,7 @@ jobs:
         java-version: [ base, next ]
     name: Build project
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - name: Setup Java and Maven
@@ -23,3 +27,32 @@ jobs:
           develocity-access-key: '${{ secrets.DEVELOCITY_ACCESS_KEY }}'
       - name: Build
         uses: spring-projects/spring-data-build/actions/maven-build@3.5.x
+        with:
+          additional-options: "-Dcheckstyle.skip=true -Dscan=false -Dgradle.cache.local.enabled=false -Dgradle.cache.remote.enabled=false -Ddevelocity.cache.local.enabled=false -Ddevelocity.cache.remote.enabled=false ${{ inputs.test-filter != '' && format('-Dtest={0} -Dsurefire.failIfNoSpecifiedTests=false', inputs.test-filter) || '' }}"
+      - name: Upload jar
+        if: ${{ matrix.java-version == 'base' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: spring-data-keyvalue-jar
+          path: target/spring-data-keyvalue-3.5.10.jar
+          if-no-files-found: error
+      - name: Test results and skip report
+        if: always()
+        shell: python
+        run: |
+          import glob, xml.etree.ElementTree as ET
+          from collections import defaultdict
+          tot = fail = err = skip = 0
+          skipped = defaultdict(list)
+          for f in sorted(glob.glob('target/surefire-reports/TEST-*.xml')):
+              r = ET.parse(f).getroot()
+              tot += int(r.get('tests', 0)); fail += int(r.get('failures', 0))
+              err += int(r.get('errors', 0)); skip += int(r.get('skipped', 0))
+              for tc in r.iter('testcase'):
+                  s = tc.find('skipped')
+                  if s is not None:
+                      msg = ' '.join((s.get('message') or s.text or 'no message').split())[:200]
+                      skipped[(tc.get('classname'), msg)].append(tc.get('name'))
+          print('=== Surefire summary: tests=%d passed=%d failures=%d errors=%d skipped=%d' % (tot, tot - fail - err - skip, fail, err, skip))
+          for (cls, msg), names in sorted(skipped.items()):
+              print('SKIPPED %s (%d tests): reason: %s' % (cls, len(names), msg))
